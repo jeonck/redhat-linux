@@ -76,3 +76,104 @@ RHEL의 강력한 보안 기능인 SELinux를 제어합니다.
 - **`getenforce`**: SELinux의 현재 모드(Enforcing, Permissive, Disabled)를 확인합니다.
 - **`setenforce [0|1]`**: SELinux 모드를 임시로 변경합니다. (0: Permissive, 1: Enforcing)
 - **`chcon` / `restorecon`**: 파일이나 디렉토리의 SELinux 보안 컨텍스트(context)를 변경하거나 복원합니다.
+
+### 7. 쿠버네티스 설치 (kubeadm 기준)
+
+RHEL 9.4에 `kubeadm`을 사용하여 쿠버네티스 클러스터를 설치할 때 필요한 주요 명령어입니다. (컨트롤 플레인 노드 기준)
+
+#### 가. 사전 준비
+
+1.  **스왑(Swap) 비활성화**: 쿠버네티스는 스왑 메모리를 지원하지 않습니다.
+    ```bash
+    # 즉시 비활성화
+    sudo swapoff -a
+    # 재부팅 후에도 적용되도록 /etc/fstab 파일에서 스왑 라인 주석 처리
+    sudo sed -i '/ swap / s/^\(.*\)$/#\1/g' /etc/fstab
+    ```
+
+2.  **필수 커널 모듈 로드 및 설정**: 컨테이너 통신을 위해 브릿지 네트워크 필터링을 활성화합니다.
+    ```bash
+    # 모듈 로드
+    sudo modprobe overlay
+    sudo modprobe br_netfilter
+
+    # sysctl 설정
+    cat <<EOF | sudo tee /etc/sysctl.d/99-kubernetes-cri.conf
+    net.bridge.bridge-nf-call-iptables  = 1
+    net.ipv4.ip_forward                 = 1
+    net.bridge.bridge-nf-call-ip6tables = 1
+    EOF
+
+    # 설정 적용
+    sudo sysctl --system
+    ```
+
+3.  **방화벽 포트 개방**: 쿠버네티스 컴포넌트가 통신할 수 있도록 방화벽 규칙을 추가합니다.
+    ```bash
+    # 컨트롤 플레인 노드용 포트
+    sudo firewall-cmd --permanent --add-port=6443/tcp
+    sudo firewall-cmd --permanent --add-port=2379-2380/tcp
+    sudo firewall-cmd --permanent --add-port=10250/tcp
+    sudo firewall-cmd --permanent --add-port=10257/tcp
+    sudo firewall-cmd --permanent --add-port=10259/tcp
+    
+    # 워커 노드용 포트 (컨트롤 플레인에도 추가 가능)
+    # sudo firewall-cmd --permanent --add-port=10250/tcp
+    # sudo firewall-cmd --permanent --add-port=30000-32767/tcp
+    
+    # 설정 리로드
+    sudo firewall-cmd --reload
+    ```
+
+#### 나. 컨테이너 런타임 설치 (CRI-O)
+
+RHEL에서는 `CRI-O`가 완전하게 지원되는 컨테이너 런타임입니다.
+
+1.  **CRI-O 설치 및 시작**:
+    ```bash
+    sudo dnf module install -y cri-o
+    sudo systemctl enable --now crio
+    ```
+
+#### 다. 쿠버네티스 컴포넌트 설치
+
+1.  **쿠버네티스 리포지토리 추가**:
+    ```bash
+    # 참고: 쿠버네티스 버전(예: v1.30)은 필요에 따라 변경하세요.
+    cat <<EOF | sudo tee /etc/yum.repos.d/kubernetes.repo
+    [kubernetes]
+    name=Kubernetes
+    baseurl=https://pkgs.k8s.io/core:/stable:/v1.30/rpm/
+    enabled=1
+    gpgcheck=1
+    gpgkey=https://pkgs.k8s.io/core:/stable:/v1.30/rpm/repodata/repomd.xml.key
+    exclude=kubelet kubeadm kubectl cri-tools kubernetes-cni
+    EOF
+    ```
+
+2.  **kubeadm, kubelet, kubectl 설치**:
+    ```bash
+    sudo dnf install -y kubelet kubeadm kubectl --disableexcludes=kubernetes
+    sudo systemctl enable --now kubelet
+    ```
+
+#### 라. 클러스터 초기화
+
+1.  **클러스터 생성 (컨트롤 플레인 노드에서 실행)**:
+    ```bash
+    # --pod-network-cidr은 사용할 CNI 플러그인에 따라 다름 (Calico 예시)
+    sudo kubeadm init --pod-network-cidr=192.168.0.0/16
+    ```
+
+2.  **kubectl 설정**:
+    ```bash
+    mkdir -p $HOME/.kube
+    sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+    sudo chown $(id -u):$(id -g) $HOME/.kube/config
+    ```
+
+3.  **CNI(Container Network Interface) 플러그인 설치**:
+    ```bash
+    # Calico 예시 (버전은 공식 문서를 참고하여 최신화하세요)
+    kubectl apply -f https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml
+    ```
